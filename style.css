@@ -1,0 +1,12 @@
+.panel{
+	margin:4px;padding:8px;border-radius:8px;border:1px solid lavender;
+	
+}
+
+table{
+	text-align: center;
+}
+tr,td{
+	
+	border:1px solid lavender;
+}

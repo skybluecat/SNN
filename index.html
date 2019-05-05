@@ -3,6 +3,8 @@
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>SNN Demo</title>
+	<link id="style-main" rel="stylesheet" type="text/css" href="style.css" />
+	
 	<script src="lib/buckets.js"></script>
     <script src="lib/dat.gui.js"></script>
     <script src="lib/d3-v5.js"></script>
@@ -11,21 +13,59 @@
 	<script src="snn-rules.js"></script>
 	<script src="main.js"></script>
 </head>
-<body style="position:absolute;height:100%;width:100%;margin:0;padding:0;">
+<body style="position:absolute;height:100%;width:100%;margin:0;padding:0;display:flex;flex-flow:row;">
 
 
 
-<div id="controls-area" style="position:absolute;margin:0;padding:0;right:0%;width:20%;height:100%"></div>
-<div id="main-area" style="position:absolute;margin:0;box-sizing:border-box;padding:8px;left:0%;width:80%;height:100%"> 
-	<h1>SNN interactive visualization and debugging</h1>
-	<p>network info</p>
-	<p id="network-info-area"></p>
-	<p>tests info</p>
-	<p id="test-output-area"></p>
-	<p >debug input</p>
-	<input type="textbox"></input>
-	<p id="debug-output-area"></p>
+
+<div id="main-area" style="margin:0;padding:8px;box-sizing:border-box;left:0%;width:80%;height:100%"> 
+	<h2>SNN Lab</h2>
+	
+	<div class="panel">
+		<h3  style="margin-top:0;">Network and training</h3>
+		<p id="network-info-area"></p>
+		<p id="neurons-info-area"></p>
+		<p id="synapses-info-area"></p>
+		<table id="network-table" style="width:100%">
+			<thead>
+				<tr class="title"></tr>
+				<tr class="columns"></tr>
+			</thead>
+			<tbody></tbody>
+		</table>
+		
+		
+	</div>
+	
+	
+	<div class="panel">
+		<h3  style="margin-top:0;">Test cases</h3>
+		<p id="test-output-area"></p>
+		<table id="tests-table" style="width:100%">
+			<thead>
+				<tr class="title"></tr>
+				<tr class="columns"></tr>
+			</thead>
+			<tbody></tbody>
+		</table>
+	</div>
+		
+		
+		
+	<div class="panel">
+		<h3  style="margin-top:0;">Debug input</h3>
+		<p>(type numbers or boolean values - "true" or "false" - separated by commas)</h3>
+		<input id="debug-input" type="textbox"></input>
+		<button id="debug-run-button">run</button>
+		<p id="debug-output-area"></p>
+		
+	</div>
+	
+	
+	
 </div>
+
+<div id="controls-area" style="margin:0;box-sizing:border-box;padding:0;right:0%;width:20%;min-width:245px;height:100%"></div>
 
 
 </body>

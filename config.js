@@ -21,13 +21,16 @@ var config={
 	highRate:1,
 	lowRate:0.1,
 	
-	
+	//training
 	running:true,
 	trainingBatchSize:100,
+	trainingInterval:1000,
+	
 	learningRate:0.1,
 	hebbianFactor:0.1,
 	linearFactor:0.01,
 	normalizationFactor:0.01,
+	STDPFactor:0.01,
 	
 	
 };
@@ -59,4 +62,6 @@ function initControls(){
 	trainingFolder.add(config,"trainingBatchSize",1,1000);
 	trainingFolder.add(config,"hebbianFactor",0.01,0.5);
 	trainingFolder.add(config,"linearFactor",0,0.5);
+	trainingFolder.add(config,"normalizationFactor",0.001,0.1);
+	trainingFolder.add(config,"STDPFactor",0.001,0.1);
 }

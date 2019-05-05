@@ -14,7 +14,9 @@ let HebbianRule={//note: here the rule is not simply v1v2, because when neurons 
 	},
 };
 
-let STDPFunc=(source,target,synapse)=>{return (source.trace*target.trace*10-(source.trace+target.trace)*0.01-synapse.weight*config.normalizationFactor)}
+let STDPFunc=(source,target,synapse)=>{
+	return (target.trace-source.trace)*config.STDPFactor-synapse.weight*config.normalizationFactor
+}
 
 let STDPRule={
 	useTrainingOutput:true,
@@ -30,7 +32,6 @@ let STDPRule={
 			let delta=STDPFunc(source,target,synapse);
 			net.updateWeight(synapse,delta);
 		}
-		
 	},
 };
 

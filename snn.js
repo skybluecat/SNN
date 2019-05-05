@@ -165,7 +165,7 @@ class EventBasedNetwork{
 		this.layers.push(inputlist);
 		if(hiddenLayers){
 			let newLayer=[];
-			for(let i=0;i<hiddenLayes.length;i++){
+			for(let i=0;i<hiddenLayers.length;i++){
 				let size=hiddenLayers[i];
 				for(let j=0;j<size;j++){
 					let name="layer"+i+"_"+j;
