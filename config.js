@@ -15,11 +15,14 @@ var config={
 	historyLength:5,
 	
 	//network and training
+	modelStepSize:0.01,//needs to be smaller ?
 	globalTimeStepSize:0.1,//will advance time, keeping all neurons more or less in sync, and trigger "time passing" events even if no other events are happening to some neurons
 	timeLength:10,
 	trainingOutputDelay:0.1,
+	outputDelay:0.1,
 	highRate:1,
 	lowRate:0.1,
+	exclusiveSpikePenalty:-1,//set the voltage to a negative value after an encoded spike, to supress other natural spikes
 	
 	//training
 	running:true,
@@ -51,6 +54,7 @@ function initControls(){
 	
 	var networkFolder = gui.addFolder('Network');
 	networkFolder.add(config,"globalTimeStepSize",0.01,0.5);
+	networkFolder.add(config,"modelStepSize",0.01,0.5);
 	networkFolder.add(config,"timeLength",2,50);
 	networkFolder.add(config,"trainingOutputDelay",2,50);
 	networkFolder.add(config,"highRate",5,100);

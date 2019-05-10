@@ -1,25 +1,9 @@
 
-/*
-
-inputFactor=1
-biasInput=0 # ?? to make neurons fire when there's no positive input, should all neurons get a fixed input current?
-maxFiringRate=25 # some neurons typically can only fire once per some time units
-# even if LIF neurons don't really have a max firing rate, it's very tricky to train it correctly and have
-# it fire almost every time step, so I think using a max firing rate to represent True may be better. 
-# (and it is independent from dt)
-# Also False is represented as a minimum firing rate, not no firing.
-minFiringRate=5
-minI=1.01 # they cause this LIF neuron to fire around min/max rates, and are used to represent True and False inputs
-maxI=1.6
-
-*/
-
-
 class EventBasedNeuron{
 	//this doesn't really have V at all time steps, instead it receives and emits firing events explicitly in a continuous timeframe, and although when it receives events it will calculate its new voltage (for keeping track of its internal state), and its voltage changes according to LIF formulas, in the meantime when it's not disturbed it really has no voltage data. You can observe it at any current or future moment in time, but it doesn't have a history and you cannot observe past voltages.
 	
-	constructor(network){
-		this.network=network;
+	constructor(net){
+		this.net=net;
 		this.v=config.initialV;
 		this.trace=0;
 		this.time=0;
@@ -51,10 +35,8 @@ class EventBasedNeuron{
 					this.v=config.Vr;
 					this.trace=1;
 					this.lastFireTime=time;
-					this.firing=true;//means this is going to fire soon, but trace etc are not updated yet because I want to update them in one place only
-					//this.sendSpike();
-					//if it should fire, fire after a short delay if it was not already firing, so any remaining incoming spikes at this moment happen before its firing
-					this.network.addEvent({type:FIRING,time:this.time+this.firingDelay,target:this.id});
+					this.firing=true;//if it should fire, fire after a short delay if it was not already firing, so any remaining incoming spikes at this moment happen before its firing
+					this.net.addEvent({type:FIRING,time:this.time+this.firingDelay,target:this.id});
 				}
 				//else keep the voltage?
 			}
@@ -72,22 +54,34 @@ class EventBasedNeuron{
 		this.lastFiringTimes[0]=this.time;
 		this.lastFireTime=this.time;
 		this.firingCount++;
+		//if this spike is encoded, we assume that it's undesirable to have any more non-injected spikes, so decrease the voltage.
+		if(ev.exclusive){this.v=config.exclusiveSpikePenalty;}
 		
 		for(let synapse of this.outSynapses){
 			let target=synapse.target;//neuron ID in the network?
 			let delay=synapse.delay;
 			let weight=synapse.weight;
-			this.network.addEvent({type:RECEIVING,target:target,value:weight,time:this.time+delay});
+			this.net.addEvent({type:RECEIVING,target:target,value:weight,time:this.time+delay});
 		}
 		this.firing=false;
 	}
-	getRecentFiringRate(){//we only know the time of several most recent firing events, so estimate teh firing rate by current time - earliest record of firing/firing records (or 0 if there are not any)
+	getRecentFiringRate(){//we only know the time of several most recent firing events, so estimate the firing rate by average interval, or current interval if it's larger than the average interval
 		let earliestFiringTime=-Infinity,count=0;
 		for(let i=this.lastFiringTimes.length-1;i>=0;i--){//try from the earliest to the latest
 			if(this.lastFiringTimes[i]!=-Infinity){earliestFiringTime=this.lastFiringTimes[i];count=i+1;break;}
 		}
-		if(count>=2)return (this.time-earliestFiringTime)/count;//if there's only one spike and it's right at this time, estimating the rate would not make sense, so just assume it's 0
-		else return 0;
+		if(count>=2){
+			let avgTime=(this.lastFireTime-earliestFiringTime)/(count-1),interval=avgTime;
+			if(this.time-this.lastFireTime>avgTime){interval=this.time-this.lastFireTime;}//the rate should be smooth for stable firing no matter when it's sampled, but should start dropping immediately when a spike comes later than expected
+			return 1/interval;
+		}
+		else return 0;//if there's only one spike, estimating the rate would not make sense, so just assume it's 0
+	}
+	encode(value,untilTime){
+		return this.adapter.encode(value,untilTime);
+	}
+	decode(){
+		return this.adapter.decode();
 	}
 	reset(){
 		this.trace=0;
@@ -96,12 +90,14 @@ class EventBasedNeuron{
 		this.firingCount=0;
 		this.lastFireTime=-Infinity;
 		this.lastFiringTimes.fill(-Infinity);
+		if(this.adapter){this.adapter.reset();}
 	}
-	saveState(){
-		return {v:this.v,time:this.time,trace:this.trace};
+	save(){//save adapter state too
+		let obj={v:this.v,time:this.time,trace:this.trace};if(this.adapter){obj.adapter=this.adapter.save();}
+		return obj;
 	}
-	loadState(obj){
-		this.v=obj.v;this.trace=obj.trace;this.time=obj.time;
+	load(obj){
+		this.v=obj.v;this.trace=obj.trace;this.time=obj.time;if(this.adapter){this.adapter.load(obj.adapter);}
 	}
 }
 
@@ -116,11 +112,11 @@ function eventComparator(a,b){
 //the priority of events: receiving inputs > firing
 class EventBasedNetwork{
 	constructor(options){
-		this.time=0;
-		this.inputNeurons={};
-		this.inputNeuronList=[];
-		this.outputNeurons={};
-		this.outputNeuronList=[];
+		this.time=0;this.globalTimeStep=0;
+		this.inputs={};
+		this.inputList=[];
+		this.outputs={};
+		this.outputList=[];
 		this.neurons={};
 		this.synapses=[];
 		this.eventQueue=new buckets.PriorityQueue(eventComparator);
@@ -149,12 +145,13 @@ class EventBasedNetwork{
 	}
 	addInputNeuron(n){
 		if(typeof n!="object")n=this.neurons[n];
-		n.isInput=true;this.inputNeurons[n.id]=n;this.inputNeuronList.push(n);
+		n.isInput=true;this.inputs[n.id]=n;this.inputList.push(n);
 	}
 	addOutputNeuron(n){
 		if(typeof n!="object")n=this.neurons[n];
-		n.isOutput=true;this.outputNeurons[n.id]=n;n.outputIndex=this.outputNeuronList.length;this.outputNeuronList.push(n);
+		n.isOutput=true;this.outputs[n.id]=n;n.outputIndex=this.outputList.length;this.outputList.push(n);
 	}
+	
 	addLayers(inputs,outputs,hiddenLayers){
 		this.layers=[];let inputlist=[],outputlist=[];
 		for(let i=0;i<inputs;i++){
@@ -193,93 +190,121 @@ class EventBasedNetwork{
 			}
 		}
 	}
+	setAdapters(adapterClass){
+		for(let neuron of this.inputList){neuron.adapter=new adapterClass(neuron);}
+		for(let neuron of this.outputList){neuron.adapter=new adapterClass(neuron);}
+	}
+	setLearningRule(rule){this.learningRule=rule;}
+	resetWeights(){
+		for(let synapse of this.synapses){synapse.weight=Math.random()*0.4+0.3;}
+	}
 	addEvent(ev){
 		if(typeof ev !="object")throw Error();
 		if(ev.target==undefined)throw Error();if(isNaN(ev.time))throw Error();
 		this.eventQueue.add(ev);
 	}
-	addInputSpikes(inputs){
-		for(let spike of inputs){//inputs reference input indices, not neuron IDs, need to get neuron IDs
-			let targetID=this.inputNeuronList[spike.target].id;
-			this.addEvent({type:FIRING,target:targetID,time:spike.time});
-		}
-	}
-	addOutputSpikes(outputs){
-		for(let spike of outputs){//forced output for training
-			let targetID=this.outputNeuronList[spike.target].id;
-			this.addEvent({type:FIRING,target:targetID,time:spike.time});
-		}
-	}
-	nextTick(callbacks){//onFiring, onReceiving
-		if(!callbacks)callbacks={};
-		let ev=this.eventQueue.dequeue();
+
+	nextTick(training=false){//now the network has the learning rule as a proeprty, and doesn't use callbacks here
+		let ev=this.eventQueue.dequeue();let rule=this.learningRule;
 		let oldTime=this.time;let oldTimeStep=this.globalTimeStep;let stepSize=config.globalTimeStepSize;
-		while(this.time+stepSize<ev.time){//process global time steps, up to but not including the event's time 
-			this.time+=stepSize;
+		while(this.globalTimeStep+stepSize<ev.time){//process global time steps, up to but not including the event's time - even if nexttick is called very often, global steps still happen on its own pace
+			this.globalTimeStep+=stepSize;this.time=this.globalTimeStep;
 			for(let neuronID in this.neurons){
 				this.neurons[neuronID].simulate(this.time);
 			}
-			if(callbacks.onGlobalTimeStep){callbacks.onGlobalTimeStep(this,this.time);}
+			if(training&&rule.onGlobalTimeStep){rule.onGlobalTimeStep(this,this.time);}
 		}
 		this.time=ev.time;
 		let target=this.neurons[ev.target];
 		
 		switch (ev.type){
 			case FIRING:
-				if(callbacks&&callbacks.onFiring){callbacks.onFiring(this,ev);}
+				if(training&&rule.onFiring){rule.onFiring(this,ev);}
 				target.sendSpike(ev);
-				if(ev.target in this.outputNeurons){//add the output when it leaves the queue, so the output spikes are in time order
+				//now the output is directly decoded from recent history, and dynamic output should be captured by the user code
+				/*if(ev.target in this.outputNeurons){//add the output when it leaves the queue, so the output spikes are in time order
 					this.outputSpikes.push({source:target.outputIndex,time:ev.time});//it's called "source"
-				}
+				}*/
 				break;
 			case RECEIVING:
-				if(callbacks&&callbacks.onReceiving){callbacks.onReceiving(this,ev);}
+				if(training&&rule.onReceiving){rule.onReceiving(this,ev);}
 				target.receiveSpike(ev);
 				if(config.debug)console.log(ev.target+ " received spike of value "+ev.value+" at time "+ev.time+", now its voltage is "+target.v);
 				break;
 			default:throw Error("unknown event type "+ev.type);
 		}
 	}
-	runUntilDone(inputSpikes,callbacks){//onStart, onEnd
-		//returns all output spike events, when there are no more spikes in the system
-		//supposes that teh queue and the output spike list was empty
-		if(!callbacks)callbacks={};
-		this.addInputSpikes(inputSpikes);
-		if(callbacks.trainingOutputSpikes){this.addOutputSpikes(callbacks.trainingOutputSpikes);}//set by the training, because this code doesn't know the expected output here
-		if(callbacks&&callbacks.onStart){callbacks.onStart(this);}//can be used to add forced output
-		while(!this.eventQueue.isEmpty()){
-			this.nextTick(callbacks);//for local spike-based updates like STDP
+	runUntil(time,isTraining){
+		
+		while((!this.eventQueue.isEmpty())&&(this.eventQueue.peek().time<=time)){//don't go beyond that time
+			this.nextTick(isTraining);//for local spike-based updates like STDP
 		}
-		if(callbacks&&callbacks.onEnd){callbacks.onEnd(this);}//can be used to do error-based training
-		return this.outputSpikes;
+		//advance to that moment
+		for(let neuronID in this.neurons){
+			this.neurons[neuronID].simulate(time);
+		}
+		//when this is called (for incremental running), the input adapters' time should have already advanced to the current time, so don't have to advance their time.
 	}
-	resetState(){//keep the topology ad weights but reset spikes and voltages
+
+	runInputs(inputs,trainingOutputs){//runs for the whole timeLength; only works for static inputs and expected outputs (dynamic stuff must use a model) since the network runs continuously but I don't see how to accurately encode it. (Maybe the encoder can numerically do it with more steps, if the value is a function) but anyway this does not support output-input feedback, only predefined inputs
+		//returns an object with output values (using neuron names)
+		this.reset();
+		for(let neuronID in this.inputs){
+			if(neuronID in inputs){this.inputs[neuronID].encode(inputs[neuronID]);}//until TimeLength by default
+		}
+		//trainingOutputs can be functions but are only evaluated once in the beginning
+		//if there are no training spikes, training outputs have no effect on nets, unlike models
+		if(trainingOutputs&&this.learningRule.useTrainingOutput){//even if the learning rule doesn't inject training outputs, it may still be used for error-based learning (or you can pass in true if there's no expected output)
+			let spikes;//debug
+			for(let neuronID in this.outputs){
+				let value=trainingOutputs[neuronID];
+				if(typeof value=="function"){value=value(inputs);}
+				if(neuronID in trainingOutputs){
+					spikes=this.outputs[neuronID].encode(value);
+				}
+			}
+		}
+		while(!this.eventQueue.isEmpty()&&(this.eventQueue.peek().time<=config.timeLength)){//+config.outputDelay?
+			this.nextTick(trainingOutputs);//for local spike-based updates like STDP
+		}
+		return this.decodeOutputs();
+	}
+	decodeOutputs(){
+		let outputs={};
+		for(let neuronID in this.outputs){
+			outputs[neuronID]=this.outputs[neuronID].decode();
+		}
+		return outputs;
+	}
+	reset(){//keep the topology ad weights but reset spikes and voltages
+		this.time=0;this.globalTimeStep=0;
 		this.eventQueue=new buckets.PriorityQueue(eventComparator);
 		this.outputSpikes=[];
 		for(let id in this.neurons){
 			this.neurons[id].reset();
+			if(this.neurons[id].adapter)this.neurons[id].adapter.reset();
 		}
 	}
-	saveState(){
+	save(){//also save adapter states?
 		//only saves neuron voltages and spikes in the queue etc, not the topology and weights right now.
-		//used to test the output given some input, without changing teh current weights etc.
+		//used to test the output given some input, without changing the current weights etc.
 		let neuronStates={};
 		for(let id in this.neurons){
-			neuronStates[id]=this.neurons[id].saveState();
+			neuronStates[id]=this.neurons[id].save();
 		}
 		return {neuronStates:neuronStates,eventQueue:this.eventQueue,outputSpikes:this.outputSpikes,time:this.time}
 	}
-	loadState(obj){
+	load(obj){
 		for(let id in this.neurons){
-			this.neurons[id].loadState(obj.neuronStates[id]);
+			this.neurons[id].load(obj.neuronStates[id]);
 		}
 		this.eventQueue=obj.eventQueue;this.outputSpikes=obj.outputSpikes;this.time=obj.time;
 	}
 	runTestInputs(inputs){
-		let state=this.saveState();
-		this.resetState();
-		let output=this.runUntilDone(inputs);
-		this.loadState(state);
+		let state=this.save();
+		//this.reset();
+		let output=this.runInputs(inputs);
+		this.load(state);
 		return output;
 	}
 	updateWeight(synapse,delta){//one synapse
@@ -295,102 +320,182 @@ class EventBasedNetwork{
 			}
 		}
 	}
-	
-	//allow getting events as a generator? events include firing and receiving spikes
-	setEncoder(encoder,index){this.inputNeuronList[index].encoder=encoder;}
-	setEncoders(encoders){
-		if(Array.isArray(encoders)){for(let i=0;i<encoders.length;i++){this.setEncoder(encoders[i],i);}}
-		else{for(let i=0;i<this.inputNeuronList.length;i++){this.setEncoder(encoders,i);}}
-	}
-	setDecoder(decoder,index){this.outputNeuronList[index].decoder=decoder;}
-	setDecoders(decoders){
-		if(Array.isArray(decoders)){for(let i=0;i<decoders.length;i++){this.setDecoder(decoders[i],i);}}
-		else{for(let i=0;i<this.outputNeuronList.length;i++){this.setDecoder(decoders,i);}}
-	}
-	setOutputEncoder(encoder,index){this.outputNeuronList[index].encoder=encoder;}
-	setOutputEncoders(encoders){
-		if(Array.isArray(encoders)){for(let i=0;i<encoders.length;i++){this.setOutputEncoder(encoders[i],i);}}
-		else{for(let i=0;i<this.outputNeuronList.length;i++){this.setOutputEncoder(encoders,i);}}
-	}
-	encode(inputs,delay){
-		let spikes=[];
-		for(let i=0;i<inputs.length;i++){
-			let value=inputs[i];
-			let encoder=this.inputNeuronList[i].encoder;
-			let temp=encoder(value);
-			for(let spike of temp){spike.target=i;if(delay)spike.time+=delay;}//need to add target information here
 
-			spikes=spikes.concat(temp);
-		}
-		return spikes;
+}
+
+
+class EventBasedModel{//the model wraps the network along with other aspects of the simulation, into something that can be simulated in time steps and can directly take logical inputs and give useful outputs. 
+	constructor	(net){
+		this.nets=[];if(net)this.addNetwork(net);
+		this.variables={};this.links=[];
+		this.variableValues={};
+		this.inputs={};this.inputList=[];this.outputs={};this.outputList=[];
+		this.time=0;
 	}
-	encodeOutput(outputs,delay){
-		let spikes=[];
-		for(let i=0;i<outputs.length;i++){
-			let value=outputs[i];
-			let encoder=this.outputNeuronList[i].encoder;
-			let temp=encoder(value);
-			for(let spike of temp){spike.target=i;if(delay)spike.time+=delay;}//need to add target information here
-			spikes=spikes.concat(temp);
-		}
-		return spikes;
+	addNetwork(net){this.nets.push(net);}
+	addVariable(name,value,options){
+		//range? 
+		this.variables[name]={id:name,value:value,source:null,target:null};//for now a variable only connects to one neuron?
+		this.variableValues[name]=value;
+		this.encodersForNeurons={};
 	}
-	decode(spikes){
-		let neuronSpikes=[];for(let i=0;i<this.outputNeuronList.length;i++){neuronSpikes[i]=[];}
-		for(let spike of spikes){//note: output spikes are also referenced by output index, but it's called source rather than target
-			neuronSpikes[spike.source].push(spike);
+	addLink(source,target){
+		this.links.push({source:source,target:target});
+		if(typeof source=="string"){this.variables[source].target=target;target.inputVariable=source;}//a neuron - normally one variablel only has one target?
+		if(typeof target=="string"){this.variables[target].source=source;source.outputVariable=target;}//a neuron
+	}
+	addInput(name){this.inputs[name]=this.variables[name];this.inputList.push(this.variables[name]);}
+	addOutput(name){this.outputs[name]=this.variables[name];this.outputList.push(this.variables[name]);}
+	setInputs(inputs){//mark some variables as inputs
+		if(typeof inputs=="string")inputs=inputs.split(",");
+		for(let name of inputs){if(name in this.variables==false)throw Error();this.addInput(name);}
+	}
+	setOutputs(outputs){//mark some variables as inputs
+		if(typeof outputs=="string")outputs=outputs.split(",");
+		for(let name of outputs){if(name in this.variables==false)throw Error();this.addOutput(name);}
+	}
+	setSimulationFunc(f){
+		if(typeof f=="string")f=eval(f);
+		this.simulationFunc=f;
+	}
+	resetWeights(){for(let net of this.nets) net.resetWeights();}
+	
+	setVariable(name,value){
+		if(name in this.variables==false)throw Error();
+		if(typeof value=="function")value=value(this.variableValues,this.time);
+		if(value===undefined||Number.isNaN(value))throw Error();
+		this.variables[name].value=value;
+		this.variableValues[name]=value;
+	}
+	setVariables(variables){
+		for(let name in this.variables){
+			if(name in variables==false)continue;
+			this.setVariable(name,variables[name]);
 		}
-		let results=[];
-		for(let i=0;i<this.outputNeuronList.length;i++){
-			results[i]=this.outputNeuronList[i].decoder(neuronSpikes[i]);
+	}
+	
+	nextStep(inputs,trainingOutputs){
+
+		let stepSize=config.modelStepSize,nextStepTime=this.time+stepSize;
+		if(inputs){//dynamic input
+			this.setVariables(inputs);
 		}
-		return results;
+		//collect training values - they may be shared by networks. Now they will be set, whether or not nets use them. (for evaluating the loss, don't use the expected output, but use the loss function)
+		if(trainingOutputs){this.setVariables(trainingOutputs);}
+		
+		for(let net of this.nets){
+			//one network's output can only affect otehr networks in the next step, so encode and run networks before decoding all networks
+			for(let neuronID in net.inputs){
+				//the network's inputs may be different from the model's inputs
+				let neuron=net.inputs[neuronID];
+				let name=neuron.inputVariable;//should set if available
+				let value=this.variables[name].value;
+				neuron.encode(value,nextStepTime);//until next step
+			}
+			//forced output needs to be handled here: set and encode. For loss-based training, the running of the model is no different from testing, so no expected output needs to be present?
+			//trainingOutputs, like inputs, is an object
+			if((trainingOutputs)&&net.learningRule.useTrainingOutput){//if there's no training output when it's requested (like in testing), it won't encode them
+				for(let neuronID in net.outputs){
+					let neuron=net.outputs[neuronID];
+					let name=neuron.outputVariable;//should set if available
+					let value;
+					if(name in trainingOutputs)value=this.variableValues[name];
+					else throw Error("missing training output "+name);
+					neuron.encode(value,nextStepTime);//until next step
+				}
+			}
+			
+			net.runUntil(nextStepTime,trainingOutputs);//note: if training inputs are used, add them before running the network.
+			
+			//if it uses forced output, set the dynamic desired output if available, instead of the neuron's outputs, to avoid error buildup; but if there's no training output (loss-based training) then don't do it
+		}
+		//one network's output can only affect otehr networks in the next step, so encode and run networks before decoding all networks
+		//after all nets are run, decode teh outputs, except tose that are in the forces training outputs
+		for(let net of this.nets){
+			for(let neuronID in net.outputs){
+				let neuron=net.outputs[neuronID];
+				let name=neuron.outputVariable;//should set if available
+				if(!name)throw Error("missing training output "+name);
+				let value;
+				if((!trainingOutputs)||(name in trainingOutputs==false)){
+					value=neuron.decode();this.setVariable(name,value);
+				}
+			}
+		}
+			
+		//simulate one step; the way the simulate fuction is written, assumes there's one object that contains these values
+		for(let name in this.variables){this.variableValues[name]=this.variables[name].value;}
+		this.simulationFunc(this.variableValues,stepSize);
+		for(let name in this.variables){this.variables[name].value=this.variableValues[name];}
+		
+		this.time=nextStepTime;
+	}
+	reset(){
+		this.time=0;
+		for(let net of this.nets){net.reset();}
+	}
+	//unlike networks that may run until spikes are exhausted, models must run for a predefined time period
+	runInputs(inputs,trainingOutputs){//the same training and testing API as networks, but networks can run in continuous time but models only run in steps. hints can be functions that are evaluated every step, for dynamic training inputs (eg motion) - networks also have hints but they are static (the difference between expected outputs and hints is not just whetehr it's in the model's output, but also when they are evaluated - expected outputs depend on the sampled input and don't change in time, but hints can change in time
+		//this runs from time 0. 
+		this.reset();
+		while(this.time<config.timeLength){
+			this.nextStep(inputs,trainingOutputs);
+		}
+		return this.variableValues;
+	}
+	runTestInputs(inputs){
+		//let state=this.save();
+		this.reset();
+		let output=this.runInputs(inputs);
+		//this.load(state);
+		return output;
 	}
 }
 
-//training needs to provide I/O encoding and decoding, real-time visual output and testing (to see how well training is going and whether there are test cases whose outputs don't seem to be improved by training - to be able to stop training early and not waste time)
-//also training rules: 
-
 class EventBasedTraining{
-	constructor(net,func,learningRule,sampler,lossFunc){
-		//net is a network or a description of multilayer network shape like [2,[2],1]
-		//func is a function from unencoded logical inputs (ie numbers or booleans, not spikes) to desired unencoded outputs; I/O are arrays and are applied to the list of inputs and outputs.
-		//sampler is a function that returns a random possible input. basic samplers can uniformly sample boolean or (some range of) integers or floats, or teh user can define others.
-		//encoder/decoder transforms spikes from/to logical input. Now all inputs/outputs can use teh same encoder/decoder.
-		//should encoder/decoder be decided when building the network or adding inputs/outputs? I don't see how having a network with multiple sets of encoder/decoder helps. however, it is essential that the user can have access to input/output spikes and not just logical values.(for debugging/visualization for example) But then, the network may be better left as just a network and leave encoding to other parts of teh code. Plus, the user may what to test different encoding parameters as well, so it shouldn't be a part of the network?
-		//
-		this.net=net;this.targetFunc=func;this.learningRule=learningRule;this.sampler=sampler;this.lossFunc=lossFunc;
-		//this.encoder=encoder;this.decoder=decoder;
-		//learningRule.encoder=this.encoder;learningRule.decoder=this.decoder;//some rules may need them
-		
+	constructor(net,funcs,samplers,lossFunc,hints){//net cam also be a model - they behave similarily
+		this.net=net;this.targetFuncs=funcs;this.samplers=samplers;this.lossFunc=lossFunc;this.hints=hints;
+		//samplers is a map of functions, or even constant values?
+		//hints is an optional map of dynamic training outputs, evaluated at every step for models (nets don't ahve steps so they evaluate once only). funcs (expected outputs) are static and only evaluated once for one run.
 	}
-	trainInput(inputs){//one set of inputs and outputs; the rule can listen to different events like firing or receiving, or at the end
-		let inputSpikes=this.net.encode(inputs);let expectedOutputs=this.targetFunc.apply(null,inputs);if(Array.isArray(expectedOutputs)==false)expectedOutputs=[expectedOutputs];
-		if(this.learningRule.useTrainingOutput){
-			this.learningRule.trainingOutputSpikes=this.net.encodeOutput(expectedOutputs,config.trainingOutputDelay);
+	getSample(){
+		if(typeof this.samplers=="function")return this.samplers();
+		let inputs={};
+		for(let name in this.samplers){
+			let sampler=this.samplers[name];let value=sampler;if(typeof value=="function")value=value();inputs[name]=value;
 		}
-		this.net.runUntilDone(inputSpikes,this.learningRule);//for learning rules that need training inputs, it should add firing or input events to output neurons in its onStart callback. The delay if needed is also defined in the learning rule. If it needs an encoder (in case of training inputs) or a decoder (for back propagation type rules), 
+		return inputs;
+	}
+	trainInput(inputs){//now training doesn't do encoding
+		//this.net.outputs or model.outputs is the map of real outputs; otehr things in func may be training hints??
+		//note:pass the target functions. the model uses them dynamically but networks use them statically
+		//need to reset (for time etc)
+		let outputs=this.net.runInputs(inputs,this.targetFuncs);
+		let loss=this.lossFunc(inputs,outputs);
+		//for simplicity, return the inputs, outputs, and loss (now there are no explicit expected outputs)
+		return {inputs:inputs,outputs:outputs,loss:loss};
 	}
 	train(episodes,callback){
-		//use the global config for learning rates, for interactivity
-		//after each episode, the network should be reset and there would not be any need for delay between episodes; also, the learning weight changes must defined per episode instead of per time step (and in fact we don't truly have per time-step learning since we don't have time steps) so average firing rate etc have to be managed by the rule itself, and even that is limited to single episodes.
-		//and so there's no time window in an episode to apply learning rules on, and no time window defined here to apply rate-encoded inputs; instead, the length of inputs is part of the encoder's work.
-
+		//after each episode, the network should be reset and there would not be any need for delay between episodes; also average firing rate etc is limited to single episodes. 
 		if(episodes==undefined){
-			if(this.sampler.type=="boolean")episodes=Math.pow(2,Object.keys(this.net.inputs).length)*10;
-			else episodes=100;
+			/*let episodes=1;
+			let inputCount=Object.keys(this.samplers).length;
+			for(let name in this.samplers){
+				let sampler=this.samplers[name];
+				if(typeof sampler!="function")continue;
+				if(sampler.isBoolean)episodes*=2;else episodes*=10;
+			}*/
+			episodes=100;
 		}
 		for(let e=0;e<episodes;e++){
-			let inputs=this.sampler();
+			let inputs=this.getSample();
+			
 			this.trainInput(inputs);
 			if(callback)callback();
 		}
 	}
-	testInput(inputs){
-		//this test will not affect the state
-		let inputSpikes=this.net.encode(inputs);
-		let outputSpikes=this.net.runTestInputs(inputSpikes);
-		let outputs=this.net.decode(outputSpikes);
+	testInput(inputs){//this test will not affect the state
+		let outputs=this.net.runTestInputs(inputs);
 		//let expectedOutputs=this.func(inputs);
 		return outputs;//{outputs:outputs,expectedOutputs:expectedOutputs};
 		//note: for training, boolean functions shold be converted to use float values to be able to see the error changing. so the outputs here are always numerical.
@@ -398,19 +503,17 @@ class EventBasedTraining{
 	test(episodes,diagnose=false){
 		//this test is randomized; if we need to cover all discrete cases (like booleans), explicitly test all cases
 		if(episodes==undefined){
-			if(this.sampler.type=="boolean")episodes=Math.pow(2,Object.keys(this.net.inputs).length)*10;
-			else episodes=100;
+			//if(this.sampler.type=="boolean")episodes=Math.pow(2,Object.keys(this.net.inputs).length)*10;
+			//else episodes=100;
+			episodes=100;
 		}
 		let sumLoss=0;
 		for(let e=0;e<episodes;e++){
-			let inputs=this.sampler();
-			let expectedOutputs=this.targetFunc.apply(null,inputs);
-			if(Array.isArray(expectedOutputs)==false)expectedOutputs=[expectedOutputs];
+			let inputs=this.getSample();
 			let outputs=this.testInput(inputs);
-			//if(callback)callback();
-			let loss=this.lossFunc(outputs,expectedOutputs);
+			let loss=this.lossFunc(input,outputs);
 			sumLoss+=loss;
-			if(diagnose){console.log("Inputs: "+inputs.join(",")+", outputs: "+outputs.join(",")+", expected: "+expectedOutputs.join(",")+", loss: "+loss);}
+			if(diagnose){console.log("Inputs: "+inputs.join(",")+", outputs: "+outputs.join(",")+", loss: "+loss);}
 		}
 		return sumLoss/episodes;
 	}
@@ -432,7 +535,11 @@ function clamp(x,min,max){
 	return Math.min(max,Math.max(x,min));
 }
 
-function BooleanSampler(numInputs){//returns a function that returns a uniformly sampled boolean array
+function BooleanSampler(){
+	return random01;
+}
+
+function BooleanArraySampler(numInputs){//returns a function that returns a uniformly sampled boolean array
 	return ()=>{
 		let array=[];
 		for(let i=0;i<numInputs;i++){array.push(random01());}//use numbers instead
@@ -440,26 +547,56 @@ function BooleanSampler(numInputs){//returns a function that returns a uniformly
 	}
 }
 
-function booleanRateEncoder(value){
-	let spikes=[];
-	let rate;
-	if(value){rate=config.highRate;}
-	else{rate=config.lowRate;}
-	if(rate!=0){
-		let interval=1/rate;
-		for(let time=0;time<config.timeLength;time+=interval){
-			spikes.push({time:time});
-		}
+function FloatRangeSampler(min,max){//returns a function that returns a uniformly sampled float
+	return ()=>{
+		return Math.random()*(max-min)+min;
 	}
-	return spikes;
-}
-
-function booleanRateDecoder(spikes){
-	let max=config.highRate*config.timeLength,min=config.lowRate*config.timeLength;
-	return clamp((spikes.length-min)/max,0,1);
 }
 
 
+class BooleanRateAdapter {//should it just inject/receive spikes directly with the network? it's stateful and has its own time
+	constructor(neuron){ //it attaches to the neuron, but not to the model variable? should it be a part of the network?
+		this.value=0;this.potential=0;this.time=0;this.neuron=neuron;this.net=neuron.net;this.neuronID=neuron.id;
+	}
+	save(){return {value:this.value,potential:this.potential,time:this.time};}
+	load(obj){this.value=obj.value;this.potential=obj.potential;this.time=obj.time}
+	reset(){
+		this.value=0;this.potential=0;this.time=0;
+	}
+	//it caches its own value. (this one's value is actually 0-1, but otehr kinds of adapters may work for non numerical values. Also no one said it can only work on one neuron...
+	//note: all encode/decode are based on current values, and encode has a time limit - get spikes for how long
+	encode(value,untilTime){//a delay without spikes can be added by just changing this.time
+		let spikes=[];
+		let rate;//let value=this.value;
+		rate=clamp(value,0,1)*(config.highRate-config.lowRate)+config.lowRate;
+		if(untilTime==undefined)untilTime=config.timeLength+config.outputDelay;
+		let timeLength=untilTime-this.time;
+		if(rate!=0){
+			let interval=1/rate;let totalPotential=timeLength*rate;//how many spikes it's "worth"
+			while (totalPotential+this.potential>=1){
+				let waitTime=(1-this.potential)*interval;let spikeTime=waitTime+this.time;
+				let ev={type:FIRING,target:this.neuronID,time:spikeTime,exclusive:true};
+				if(this.net)this.net.addEvent(ev);spikes.push(ev);
+				totalPotential-=(1-this.potential);this.potential=0;
+				this.time+=waitTime;
+			}
+			this.potential+=totalPotential;//remaining "partial spike"
+			this.time=untilTime;
+		}
+		else{
+			this.time=untilTime;
+		}
+		return spikes;
+	}
+	
+	decode(){//use the history of the neuron, not necessarily all output spikes. rate encoding is best decoded by taking the average interval of available recent history spikes, and if the current period without spikes is longer than that average, use 1/the current period without spikes (this ensures smoothness no matter when it's sampled, right after a spike or before a spike)
+		let max=config.highRate,min=config.lowRate;
+		//use the same rate calculation as the neuron's
+		let rate=this.net.neurons[this.neuronID].getRecentFiringRate();
+		
+		return clamp((rate-min)/(max-min),0,1);
+	}
+}
 
 
 function allBooleanInputs(numInputs){
